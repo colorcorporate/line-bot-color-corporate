@@ -1,23 +1,24 @@
 import os, time
-from flask import Flask, request, abort, jsonify
+from flask import Flask, request, abort
 import requests
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage  # ไม่ใช้ reply
+from linebot.models import MessageEvent, TextMessage  # เงียบ ไม่ตอบกลับ
 
 app = Flask(__name__)
 
-# --- ตั้งค่าจาก ENV (ใส่บน Render) ---
+# ===== ENV จาก Render =====
 CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+CHANNEL_SECRET       = os.getenv("LINE_CHANNEL_SECRET")
 
-# ปลายทางสำหรับเก็บข้อมูลภายใน (ถ้ามี)
-BEE_API_URL   = os.getenv("BEE_API_URL", "").strip()     # เช่น http://192.168.1.50:5000/save
+# ปลายทาง (ฝั่งบ้าน/ร้าน) ถ้าตั้งค่าไว้ จะส่งต่อทั้งก้อน
+BEE_API_URL   = os.getenv("BEE_API_URL", "").strip()     # เช่น https://xxxx.trycloudflare.com/save
 BEE_API_TOKEN = os.getenv("BEE_API_TOKEN", "").strip()
 
 def _mask(s): return f"{len(s)} chars, endswith:{s[-4:]}" if s else "MISSING"
 print("ENV CHECK | TOKEN:", _mask(CHANNEL_ACCESS_TOKEN), "| SECRET:", _mask(CHANNEL_SECRET))
+
 if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET:
     raise RuntimeError("Missing LINE credentials in environment variables.")
 
@@ -34,31 +35,27 @@ def callback():
     body_text = request.get_data(as_text=True)
     body_json = request.get_json(silent=True) or {}
 
-    # 1) ส่งต่อไปที่ BeeStation (ถ้าตั้งค่า BEE_API_URL ไว้)
+    # ส่งต่อเข้าบ้าน (ถ้ากำหนด BEE_API_URL)
     if BEE_API_URL:
         try:
             headers = {"Authorization": f"Bearer {BEE_API_TOKEN}"} if BEE_API_TOKEN else {}
-            # ใส่เวลารับไว้ด้วย เผื่อจะใช้เรียงเหตุการณ์
             payload = {"received_at": int(time.time()), "line_webhook": body_json}
             requests.post(BEE_API_URL, json=payload, headers=headers, timeout=1.5)
         except Exception as e:
-            # ไม่ให้ล้ม: แค่ log ไว้แล้วไปต่อ
-            print("FORWARD ERROR:", repr(e))
+            print("FORWARD ERROR:", repr(e))  # log แต่ไม่ให้ล้ม
 
-    # 2) ตรวจลายเซ็น (เพื่อความถูกต้อง) — ไม่ตอบกลับผู้ใช้
+    # ตรวจลายเซ็นและจบด้วย 200 OK (ไม่ตอบผู้ใช้)
     try:
         handler.handle(body_text, signature)
     except InvalidSignatureError:
         print("InvalidSignatureError: check LINE_CHANNEL_SECRET")
         abort(400)
-
-    # 3) สำคัญ: ตอบกลับ LINE ทันทีด้วย 200 OK (ไม่ตอบหาผู้ใช้)
     return "OK"
 
-# ทำ handler ว่าง ๆ เพื่อให้ parser ผ่าน (ไม่ตอบกลับ)
+# Handler ว่าง ๆ เพื่อให้ parser ผ่าน (เราไม่ reply)
 @handler.add(MessageEvent, message=TextMessage)
 def _handle_text(event):
-    return  # เงียบ
+    return
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
