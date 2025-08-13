@@ -1,62 +1,64 @@
-import os
-from flask import Flask, request, abort
+import os, time
+from flask import Flask, request, abort, jsonify
+import requests
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage  # ไม่ใช้ reply
 
 app = Flask(__name__)
 
-# ====== อ่านค่า ENV (ตั้งบน Render) ======
-# LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET ต้องถูกต้องของ OA เดิม
+# --- ตั้งค่าจาก ENV (ใส่บน Render) ---
 CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
-def _mask(s: str | None) -> str:
-    return f"{len(s)} chars, endswith:{s[-4:]}" if s else "MISSING"
+# ปลายทางสำหรับเก็บข้อมูลภายใน (ถ้ามี)
+BEE_API_URL   = os.getenv("BEE_API_URL", "").strip()     # เช่น http://192.168.1.50:5000/save
+BEE_API_TOKEN = os.getenv("BEE_API_TOKEN", "").strip()
 
+def _mask(s): return f"{len(s)} chars, endswith:{s[-4:]}" if s else "MISSING"
 print("ENV CHECK | TOKEN:", _mask(CHANNEL_ACCESS_TOKEN), "| SECRET:", _mask(CHANNEL_SECRET))
-
 if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET:
-    # ถ้าไม่มีค่า ให้หยุดทันที จะเห็นข้อความนี้ใน Logs
     raise RuntimeError("Missing LINE credentials in environment variables.")
 
 line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
-# ====== Health check ======
 @app.route("/", methods=["GET"])
 def home():
     return "Bot is running"
 
-# ====== Webhook ที่ LINE จะเรียก ======
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
-    body = request.get_data(as_text=True)
-    # DEBUG: แสดงข้อความสั้น ๆ ใน log (ไม่โชว์ข้อมูลส่วนตัว)
-    print("Webhook body received (len):", len(body))
+    body_text = request.get_data(as_text=True)
+    body_json = request.get_json(silent=True) or {}
 
+    # 1) ส่งต่อไปที่ BeeStation (ถ้าตั้งค่า BEE_API_URL ไว้)
+    if BEE_API_URL:
+        try:
+            headers = {"Authorization": f"Bearer {BEE_API_TOKEN}"} if BEE_API_TOKEN else {}
+            # ใส่เวลารับไว้ด้วย เผื่อจะใช้เรียงเหตุการณ์
+            payload = {"received_at": int(time.time()), "line_webhook": body_json}
+            requests.post(BEE_API_URL, json=payload, headers=headers, timeout=1.5)
+        except Exception as e:
+            # ไม่ให้ล้ม: แค่ log ไว้แล้วไปต่อ
+            print("FORWARD ERROR:", repr(e))
+
+    # 2) ตรวจลายเซ็น (เพื่อความถูกต้อง) — ไม่ตอบกลับผู้ใช้
     try:
-        handler.handle(body, signature)
+        handler.handle(body_text, signature)
     except InvalidSignatureError:
-        # ลายเซ็นไม่ถูกต้อง (มักเกิดจาก Channel Secret ไม่ตรง)
         print("InvalidSignatureError: check LINE_CHANNEL_SECRET")
         abort(400)
 
-    # ต้องตอบ 200 OK ให้ไว เพื่อให้ Verify ผ่าน
+    # 3) สำคัญ: ตอบกลับ LINE ทันทีด้วย 200 OK (ไม่ตอบหาผู้ใช้)
     return "OK"
 
-# ====== ตัวอย่างตอบกลับแบบ echo ======
+# ทำ handler ว่าง ๆ เพื่อให้ parser ผ่าน (ไม่ตอบกลับ)
 @handler.add(MessageEvent, message=TextMessage)
-def handle_text(event):
-    try:
-        reply_text = f"รับแล้ว: {event.message.text}"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-    except Exception as e:
-        # จับ error เวลา reply เพื่อดูใน Logs
-        print("Reply error:", repr(e))
+def _handle_text(event):
+    return  # เงียบ
 
 if __name__ == "__main__":
-    # สำหรับรันในเครื่อง; บน Render จะใช้ gunicorn + $PORT
     app.run(host="0.0.0.0", port=10000)
